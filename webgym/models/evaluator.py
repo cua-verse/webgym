@@ -64,6 +64,8 @@ class Evaluator:
             "model": self.openai_config.get("model"),
             "openai_api_key_env_var": self.openai_config.get("openai_api_key_env_var", "OPENAI_API_KEY"),
             "base_url": self.openai_config.get("base_url"),
+            "azure_endpoint": self.openai_config.get("azure_endpoint"),
+            "api_version": self.openai_config.get("api_version"),
         }
 
         # Get task-specific overrides if they exist
@@ -71,31 +73,43 @@ class Evaluator:
 
         # Merge: task-specific values override defaults
         merged = default_config.copy()
-        for key in ["model", "openai_api_key_env_var", "base_url"]:
+        for key in ["model", "openai_api_key_env_var", "base_url", "azure_endpoint", "api_version"]:
             if key in task_overrides and task_overrides[key] is not None:
                 merged[key] = task_overrides[key]
 
         return merged
 
     def _get_client_for_config(self, config: Dict):
-        """Get or create a client for the given configuration."""
-        from openai import OpenAI
+        """Get or create a client for the given configuration.
 
+        Supports both standard OpenAI and Azure OpenAI endpoints.
+        Azure is used when ``azure_endpoint`` is present in config.
+        """
         api_key_env_var = config["openai_api_key_env_var"]
         base_url = config.get("base_url")
+        azure_endpoint = config.get("azure_endpoint")
 
-        # Create cache key
-        cache_key = (api_key_env_var, base_url)
+        cache_key = (api_key_env_var, base_url, azure_endpoint)
 
         if cache_key not in self._clients:
             if api_key_env_var not in os.environ:
                 raise ValueError(f"Environment variable {api_key_env_var} not found")
 
-            client_kwargs = {"api_key": os.environ[api_key_env_var]}
-            if base_url:
-                client_kwargs["base_url"] = base_url
+            api_key = os.environ[api_key_env_var]
 
-            self._clients[cache_key] = OpenAI(**client_kwargs)
+            if azure_endpoint:
+                from openai import AzureOpenAI
+                self._clients[cache_key] = AzureOpenAI(
+                    api_key=api_key,
+                    azure_endpoint=azure_endpoint,
+                    api_version=config.get("api_version", "2025-04-01-preview"),
+                )
+            else:
+                from openai import OpenAI
+                client_kwargs = {"api_key": api_key}
+                if base_url:
+                    client_kwargs["base_url"] = base_url
+                self._clients[cache_key] = OpenAI(**client_kwargs)
 
         return self._clients[cache_key]
 
@@ -128,7 +142,13 @@ class Evaluator:
 
             if self.verbose:
                 base_url = config.get("base_url")
-                provider = "Gemini" if base_url and "generativelanguage.googleapis.com" in base_url else "OpenAI"
+                azure_endpoint = config.get("azure_endpoint")
+                if azure_endpoint:
+                    provider = "Azure"
+                elif base_url and "generativelanguage.googleapis.com" in base_url:
+                    provider = "Gemini"
+                else:
+                    provider = "OpenAI"
                 print(f"  {task_type}: {provider} ({config['model']})")
 
         # For backward compatibility, set default client and model
